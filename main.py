@@ -13,7 +13,7 @@ CORS(app)
 
 # ── CONFIG ──────────────────────────────────────────────────────
 ADMIN_SECRET      = os.environ.get("ADMIN_SECRET", "ton_mot_de_passe_admin")
-RAILWAY_TOKEN     = os.environ.get("RAILWAY_TOKEN", "")
+RAILWAY_TOKEN     = os.environ.get("RAILWAY_API_TOKEN") or os.environ.get("RAILWAY_TOKEN", "")
 RAILWAY_PROJECT   = os.environ.get("RAILWAY_PROJECT_ID", "")
 RAILWAY_ENV       = os.environ.get("RAILWAY_ENVIRONMENT_ID", "")
 RAILWAY_SERVICE   = os.environ.get("RAILWAY_SERVICE_ID", "")
