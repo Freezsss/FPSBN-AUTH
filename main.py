@@ -21,7 +21,7 @@ BANNER_CODES = {"bob", "freez1x", "nezz", "pinpin", "sabry"}
 
 # ── DATABASE ─────────────────────────────────────────────────────
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    conn = psycopg2.connect(DATABASE_URL, sslmode="disable")
     conn.autocommit = True
     return conn
 
