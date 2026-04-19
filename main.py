@@ -1,345 +1,302 @@
-"""
-FPSBN-AUTH Server - Railway
-"""
-
-from flask import Flask, request, jsonify, Response
-from flask_cors import CORS
-import json, os, datetime
+from flask import Flask, request, jsonify
+import json
+import os
+from datetime import datetime
 
 app = Flask(__name__)
 
-# ── CORS complet : gère aussi les preflight OPTIONS ──────────────────────────
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=False)
-
-@app.after_request
-def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"]  = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    return response
-
-@app.route("/<path:path>", methods=["OPTIONS"])
-@app.route("/", methods=["OPTIONS"])
-def handle_options(path=""):
-    return Response(status=200, headers={
-        "Access-Control-Allow-Origin":  "*",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization"
-    })
-
-# ─────────────────────────────────────────────────────────────────────────────
-
-DB_FILE      = "auth_db.json"
-ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "change_moi_2024")
+# ── CONFIG ──────────────────────────────────────────────────────
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "ton_mot_de_passe_admin")
+DATA_FILE    = "codes.json"
 
 
-def load_codes():
-    codes = {}
-    for key, value in os.environ.items():
-        if key.startswith("CODE_"):
-            code_name = key[5:].lower().strip()
-            parts = value.split(":")
-            if len(parts) >= 3:
-                banner    = parts[0].strip()
-                theme     = parts[1].strip()
-                exclusive = parts[2].strip().lower() == "true"
-            elif len(parts) == 2:
-                banner, theme = parts[0].strip(), parts[1].strip()
-                exclusive = True
-            elif len(parts) == 1:
-                banner = theme = parts[0].strip()
-                exclusive = True
-            else:
-                continue
-            codes[code_name] = {
-                "exclusive": exclusive,
-                "banner":    banner,
-                "theme":     theme
-            }
-    return codes
-
-
-def read_db():
-    if not os.path.exists(DB_FILE):
-        return {}
-    try:
-        with open(DB_FILE, "r") as f:
+# ── PERSISTANCE ─────────────────────────────────────────────────
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {"codes": {}, "banned_ips": []}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        try:
             return json.load(f)
+        except Exception:
+            return {"codes": {}, "banned_ips": []}
+
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ── UTILS ────────────────────────────────────────────────────────
+def is_expired(entry):
+    if not entry.get("expires_at"):
+        return False
+    try:
+        exp = datetime.fromisoformat(entry["expires_at"].replace("Z", "+00:00"))
+        return exp < datetime.now(exp.tzinfo)
     except Exception:
-        return {}
+        return False
+
+def check_secret(body):
+    return body.get("secret") == ADMIN_SECRET
 
 
-def write_db(db):
-    with open(DB_FILE, "w") as f:
-        json.dump(db, f, indent=2)
-
-
-# ── CHECK ────────────────────────────────────────────────────────────────────
-
-@app.route("/check", methods=["GET"])
-def check():
-    code = request.args.get("code", "").lower().strip()
-    hwid = request.args.get("hwid", "").strip()
-    if not code or not hwid:
-        return jsonify({"ok": False, "reason": "missing_params"}), 400
-
-    CODES = load_codes()
-    if code not in CODES:
-        return jsonify({"ok": False, "reason": "invalid_code"}), 200
-
-    code_def = CODES[code]
-
-    # Vérifier expiration
-    db = read_db()
-    entry = db.get(code)
-    if isinstance(entry, dict) and entry.get("expires_at"):
-        try:
-            exp = datetime.datetime.fromisoformat(entry["expires_at"])
-            if datetime.datetime.utcnow() > exp:
-                return jsonify({"ok": False, "reason": "expired"}), 200
-        except Exception:
-            pass
-
-    if not code_def["exclusive"]:
-        return jsonify({"ok": True, "status": "guest",
-                        "banner": code_def["banner"], "theme": code_def["theme"]})
-
-    locked = entry.get("hwid") if isinstance(entry, dict) else entry
-
-    if locked is None:
-        return jsonify({"ok": True, "status": "available",
-                        "banner": code_def["banner"], "theme": code_def["theme"]})
-    elif locked == hwid:
-        return jsonify({"ok": True, "status": "owner",
-                        "banner": code_def["banner"], "theme": code_def["theme"]})
-    else:
-        return jsonify({"ok": False, "reason": "taken"}), 200
-
-
-# ── CLAIM ────────────────────────────────────────────────────────────────────
-
-@app.route("/claim", methods=["POST"])
-def claim():
-    data = request.get_json(force=True, silent=True) or {}
-    code = str(data.get("code", "")).lower().strip()
-    hwid = str(data.get("hwid", "")).strip()
-    # player_name = nom avec lequel le joueur s'est identifié (le code lui-même)
-    player_name = str(data.get("player_name", code)).strip()
-
-    if not code or not hwid:
-        return jsonify({"ok": False, "reason": "missing_params"}), 400
-
-    CODES = load_codes()
-    if code not in CODES:
-        return jsonify({"ok": False, "reason": "invalid_code"}), 200
-
-    code_def = CODES[code]
-    if not code_def["exclusive"]:
-        return jsonify({"ok": True, "status": "guest"})
-
-    db    = read_db()
-    entry = db.get(code)
-
-    # Vérifier expiration
-    if isinstance(entry, dict) and entry.get("expires_at"):
-        try:
-            exp = datetime.datetime.fromisoformat(entry["expires_at"])
-            if datetime.datetime.utcnow() > exp:
-                return jsonify({"ok": False, "reason": "expired"}), 200
-        except Exception:
-            pass
-
-    locked = entry.get("hwid") if isinstance(entry, dict) else entry
-
-    if locked is None:
-        # Nouveau claim : sauvegarder hwid + nom du joueur + date de claim
-        if isinstance(entry, dict):
-            entry["hwid"]        = hwid
-            entry["player_name"] = player_name
-            entry["claimed_at"]  = datetime.datetime.utcnow().isoformat()
-            db[code] = entry
-        else:
-            db[code] = {
-                "hwid":        hwid,
-                "player_name": player_name,
-                "claimed_at":  datetime.datetime.utcnow().isoformat()
-            }
-        write_db(db)
-        return jsonify({"ok": True, "status": "claimed"})
-    elif locked == hwid:
-        return jsonify({"ok": True, "status": "already_owner"})
-    else:
-        return jsonify({"ok": False, "reason": "taken"})
-
-
-# ── STATUS (admin) ───────────────────────────────────────────────────────────
-
+# ════════════════════════════════════════════════════════════════
+# GET /status  — Panneau admin : liste des codes + IPs bannies
+# ════════════════════════════════════════════════════════════════
 @app.route("/status", methods=["GET"])
 def status():
     secret = request.args.get("secret", "")
     if secret != ADMIN_SECRET:
-        return jsonify({"ok": False, "reason": "unauthorized"}), 401
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
 
-    CODES  = load_codes()
-    db     = read_db()
-    now    = datetime.datetime.utcnow()
-    result = {}
-
-    for code, info in CODES.items():
-        entry = db.get(code)
-
-        # Compatibilité ancien format (string) et nouveau (dict)
-        if isinstance(entry, dict):
-            hwid        = entry.get("hwid")
-            player_name = entry.get("player_name", code)
-            claimed_at  = entry.get("claimed_at")
-            expires_at  = entry.get("expires_at")
-        elif isinstance(entry, str):
-            hwid        = entry
-            player_name = code
-            claimed_at  = None
-            expires_at  = None
-        else:
-            hwid = player_name = claimed_at = expires_at = None
-
-        # Vérifier expiration
-        is_expired = False
-        if expires_at:
-            try:
-                is_expired = now > datetime.datetime.fromisoformat(expires_at)
-            except Exception:
-                pass
-
-        result[code] = {
-            "exclusive":   info["exclusive"],
-            "locked_by":   hwid if hwid else None,
-            "available":   hwid is None or not info["exclusive"],
-            "player_name": player_name,
-            "claimed_at":  claimed_at,
-            "expires_at":  expires_at,
-            "expired":     is_expired,
-            "banner":      info.get("banner", ""),
-            "theme":       info.get("theme", ""),
-        }
-
-    return jsonify({"ok": True, "codes": result})
-
-
-# ── RESET individuel ─────────────────────────────────────────────────────────
-
-@app.route("/reset", methods=["POST"])
-def reset():
-    data   = request.get_json(force=True, silent=True) or {}
-    secret = str(data.get("secret", ""))
-    code   = str(data.get("code", "")).lower().strip()
-
-    if secret != ADMIN_SECRET:
-        return jsonify({"ok": False, "reason": "unauthorized"}), 401
-
-    CODES = load_codes()
-    if code not in CODES:
-        return jsonify({"ok": False, "reason": "invalid_code"}), 200
-
-    db = read_db()
-    if code in db:
-        del db[code]
-        write_db(db)
-        return jsonify({"ok": True, "msg": f"Code '{code}' reset."})
-    else:
-        return jsonify({"ok": True, "msg": f"Code '{code}' etait deja libre."})
-
-
-# ── RESET GLOBAL ─────────────────────────────────────────────────────────────
-
-@app.route("/reset-all", methods=["POST"])
-def reset_all():
-    data   = request.get_json(force=True, silent=True) or {}
-    secret = str(data.get("secret", ""))
-
-    if secret != ADMIN_SECRET:
-        return jsonify({"ok": False, "reason": "unauthorized"}), 401
-
-    write_db({})
-    return jsonify({"ok": True, "msg": "Tous les codes ont ete reinitialises."})
-
-
-# ── AJOUTER UN CODE (via variable d'env dynamique ou db) ─────────────────────
-
-@app.route("/add", methods=["POST"])
-def add_code():
-    data   = request.get_json(force=True, silent=True) or {}
-    secret = str(data.get("secret", ""))
-
-    if secret != ADMIN_SECRET:
-        return jsonify({"ok": False, "reason": "unauthorized"}), 401
-
-    code       = str(data.get("code", "")).lower().strip()
-    expires_at = data.get("expires_at", None)  # ISO string ou null
-
-    if not code:
-        return jsonify({"ok": False, "reason": "missing_code"}), 400
-
-    # On stocke l'expiration dans la db (le code doit exister en variable d'env)
-    CODES = load_codes()
-    if code not in CODES:
-        return jsonify({"ok": False, "reason": "code_not_in_env"}), 200
-
-    db = read_db()
-    if isinstance(db.get(code), dict):
-        db[code]["expires_at"] = expires_at
-    else:
-        db[code] = {"hwid": None, "expires_at": expires_at, "player_name": None}
-
-    write_db(db)
-    return jsonify({"ok": True, "msg": f"Code '{code}' mis a jour."})
-
-
-# ── MODIFIER UN CODE ──────────────────────────────────────────────────────────
-
-@app.route("/edit", methods=["POST"])
-def edit_code():
-    data   = request.get_json(force=True, silent=True) or {}
-    secret = str(data.get("secret", ""))
-
-    if secret != ADMIN_SECRET:
-        return jsonify({"ok": False, "reason": "unauthorized"}), 401
-
-    code       = str(data.get("code", "")).lower().strip()
-    expires_at = data.get("expires_at", None)  # None = jamais, string ISO = date limite
-
-    if not code:
-        return jsonify({"ok": False, "reason": "missing_code"}), 400
-
-    CODES = load_codes()
-    if code not in CODES:
-        return jsonify({"ok": False, "reason": "code_not_found"}), 200
-
-    db    = read_db()
-    entry = db.get(code, {})
-
-    if not isinstance(entry, dict):
-        entry = {"hwid": entry}
-
-    entry["expires_at"] = expires_at
-    db[code] = entry
-    write_db(db)
-
-    return jsonify({"ok": True, "msg": f"Code '{code}' modifie."})
-
-
-# ── HEALTH ───────────────────────────────────────────────────────────────────
-
-@app.route("/", methods=["GET"])
-def health():
-    CODES = load_codes()
+    data = load_data()
     return jsonify({
-        "ok":           True,
-        "service":      "FPSBN-AUTH",
-        "version":      "3.0",
-        "codes_actifs": len(CODES)
+        "ok":         True,
+        "codes":      data.get("codes", {}),
+        "banned_ips": data.get("banned_ips", [])
     })
 
 
+# ════════════════════════════════════════════════════════════════
+# GET /check  — Menu Lua : vérifie le code + l'IP du joueur
+# Params: code, ip
+# ════════════════════════════════════════════════════════════════
+@app.route("/check", methods=["GET"])
+def check():
+    code = (request.args.get("code") or "").strip().lower()
+    ip   = (request.args.get("ip")   or "").strip()
+
+    if not code or not ip:
+        return jsonify({"ok": False, "reason": "missing_fields"})
+
+    data  = load_data()
+    entry = data["codes"].get(code)
+
+    # Code inexistant
+    if entry is None:
+        return jsonify({"ok": False, "reason": "invalid_code"})
+
+    # Code expiré
+    if is_expired(entry):
+        return jsonify({"ok": False, "reason": "expired"})
+
+    # IP bannie globalement
+    if ip in data.get("banned_ips", []):
+        return jsonify({"ok": False, "reason": "ip_banned"})
+
+    # Code déjà verrouillé sur une autre IP → refus
+    locked_ip = entry.get("locked_ip")
+    if locked_ip and locked_ip != ip:
+        return jsonify({"ok": False, "reason": "ip_mismatch"})
+
+    # OK (code libre ou même IP)
+    return jsonify({
+        "ok":     True,
+        "banner": entry.get("banner", ""),
+        "theme":  entry.get("theme",  "")
+    })
+
+
+# ════════════════════════════════════════════════════════════════
+# POST /claim  — Verrouille le code sur l'IP + stocke le nom
+# Body JSON: { code, ip, player_name }
+# player_name = affichage admin UNIQUEMENT (pas utilisé pour l'auth)
+# ════════════════════════════════════════════════════════════════
+@app.route("/claim", methods=["POST"])
+def claim():
+    body        = request.get_json(force=True) or {}
+    code        = (body.get("code")        or "").strip().lower()
+    ip          = (body.get("ip")          or "").strip()
+    player_name = (body.get("player_name") or "").strip()
+
+    if not code or not ip:
+        return jsonify({"ok": False, "reason": "missing_fields"})
+
+    data  = load_data()
+    entry = data["codes"].get(code)
+
+    if entry is None:
+        return jsonify({"ok": False, "reason": "invalid_code"})
+
+    # Vérification IP (double sécurité au moment du claim)
+    locked_ip = entry.get("locked_ip")
+    if locked_ip and locked_ip != ip:
+        return jsonify({"ok": False, "reason": "taken"})
+
+    # IP bannie
+    if ip in data.get("banned_ips", []):
+        return jsonify({"ok": False, "reason": "ip_banned"})
+
+    # Première utilisation → verrouiller l'IP
+    if not locked_ip:
+        entry["locked_ip"] = ip
+
+    # Stocker le nom du joueur (affichage admin seulement)
+    if player_name:
+        entry["player_name"] = player_name
+
+    save_data(data)
+    return jsonify({"ok": True})
+
+
+# ════════════════════════════════════════════════════════════════
+# POST /reset  — Libérer un code (efface IP + nom)
+# Body JSON: { secret, code }
+# ════════════════════════════════════════════════════════════════
+@app.route("/reset", methods=["POST"])
+def reset():
+    body = request.get_json(force=True) or {}
+    if not check_secret(body):
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    code  = (body.get("code") or "").strip().lower()
+    data  = load_data()
+    entry = data["codes"].get(code)
+
+    if entry is None:
+        return jsonify({"ok": False, "reason": "code_not_found"})
+
+    entry["locked_ip"]   = None
+    entry["locked_by"]   = None   # compatibilité ancienne version
+    entry["player_name"] = None
+
+    save_data(data)
+    return jsonify({"ok": True})
+
+
+# ════════════════════════════════════════════════════════════════
+# POST /reset-all  — Libérer tous les codes
+# Body JSON: { secret }
+# ════════════════════════════════════════════════════════════════
+@app.route("/reset-all", methods=["POST"])
+def reset_all():
+    body = request.get_json(force=True) or {}
+    if not check_secret(body):
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    data = load_data()
+    for entry in data["codes"].values():
+        entry["locked_ip"]   = None
+        entry["locked_by"]   = None
+        entry["player_name"] = None
+
+    save_data(data)
+    return jsonify({"ok": True})
+
+
+# ════════════════════════════════════════════════════════════════
+# POST /add  — Créer un nouveau code d'accès
+# Body JSON: { secret, code, expires_at? }
+# ════════════════════════════════════════════════════════════════
+@app.route("/add", methods=["POST"])
+def add():
+    body = request.get_json(force=True) or {}
+    if not check_secret(body):
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    code = (body.get("code") or "").strip().lower()
+    if not code:
+        return jsonify({"ok": False, "reason": "missing_code"})
+
+    data = load_data()
+    if code in data["codes"]:
+        return jsonify({"ok": False, "reason": "code_exists"})
+
+    data["codes"][code] = {
+        "locked_ip":   None,
+        "locked_by":   None,
+        "player_name": None,
+        "expires_at":  body.get("expires_at"),
+        "banner":      body.get("banner", ""),
+        "theme":       body.get("theme",  "")
+    }
+    save_data(data)
+    return jsonify({"ok": True})
+
+
+# ════════════════════════════════════════════════════════════════
+# POST /edit  — Modifier un code existant
+# Body JSON: { secret, code, new_key?, expires_at?, banner?, theme? }
+# ════════════════════════════════════════════════════════════════
+@app.route("/edit", methods=["POST"])
+def edit():
+    body = request.get_json(force=True) or {}
+    if not check_secret(body):
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    code = (body.get("code") or "").strip().lower()
+    data = load_data()
+
+    if code not in data["codes"]:
+        return jsonify({"ok": False, "reason": "code_not_found"})
+
+    entry = data["codes"][code]
+
+    # Renommer le code
+    new_key = (body.get("new_key") or "").strip().lower()
+    if new_key and new_key != code:
+        data["codes"][new_key] = entry
+        del data["codes"][code]
+        entry = data["codes"][new_key]
+
+    # Mettre à jour les champs
+    if "expires_at" in body:
+        entry["expires_at"] = body["expires_at"]
+    if "banner" in body:
+        entry["banner"] = body["banner"]
+    if "theme" in body:
+        entry["theme"] = body["theme"]
+
+    save_data(data)
+    return jsonify({"ok": True})
+
+
+# ════════════════════════════════════════════════════════════════
+# POST /ban-ip  — Bannir une IP globalement
+# Body JSON: { secret, ip }
+# ════════════════════════════════════════════════════════════════
+@app.route("/ban-ip", methods=["POST"])
+def ban_ip():
+    body = request.get_json(force=True) or {}
+    if not check_secret(body):
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    ip = (body.get("ip") or "").strip()
+    if not ip:
+        return jsonify({"ok": False, "reason": "missing_ip"})
+
+    data = load_data()
+    if "banned_ips" not in data:
+        data["banned_ips"] = []
+
+    if ip not in data["banned_ips"]:
+        data["banned_ips"].append(ip)
+        save_data(data)
+
+    return jsonify({"ok": True})
+
+
+# ════════════════════════════════════════════════════════════════
+# POST /unban-ip  — Débannir une IP
+# Body JSON: { secret, ip }
+# ════════════════════════════════════════════════════════════════
+@app.route("/unban-ip", methods=["POST"])
+def unban_ip():
+    body = request.get_json(force=True) or {}
+    if not check_secret(body):
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    ip = (body.get("ip") or "").strip()
+    if not ip:
+        return jsonify({"ok": False, "reason": "missing_ip"})
+
+    data = load_data()
+    data["banned_ips"] = [x for x in data.get("banned_ips", []) if x != ip]
+    save_data(data)
+
+    return jsonify({"ok": True})
+
+
+# ── LANCEMENT ────────────────────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 3000))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
