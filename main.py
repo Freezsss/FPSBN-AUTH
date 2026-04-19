@@ -117,11 +117,16 @@ def get_all_vars():
     return {**dict(os.environ), **railway_get_vars()}
 
 # ── CODES ────────────────────────────────────────────────────────
+VALID_CODE_VALUES = {CODE_VALUE.lower(), "banner:banner:true"}
+
+def _is_valid_code_val(val):
+    return val.strip().lower() in VALID_CODE_VALUES
+
 def load_all_codes():
     all_vars = get_all_vars()
     codes = {}
     for key, val in all_vars.items():
-        if key.startswith(CODE_PREFIX) and val.strip() == CODE_VALUE:
+        if key.startswith(CODE_PREFIX) and _is_valid_code_val(val):
             code_id = key[len(CODE_PREFIX):]
             state_raw = all_vars.get(STATE_PREFIX + code_id, "")
             state = {}
@@ -159,7 +164,7 @@ def save_code_state(code_id, state):
 
 def code_exists(code_id):
     all_vars = get_all_vars()
-    return all_vars.get(CODE_PREFIX + code_id, "").strip() == CODE_VALUE
+    return _is_valid_code_val(all_vars.get(CODE_PREFIX + code_id, ""))
 
 # ── BANNED IPs ───────────────────────────────────────────────────
 def get_banned_ips():
@@ -367,6 +372,45 @@ def generate():
 
 
 # ════════════════════════════════════════════════════════════════
+# POST /add  — Code manuel avec nom personnalisé
+# Body JSON: { code, expires_at? }
+# Logique : codes prédéfinis (bob/freez1x/nezz/pinpin/sabry) → Banner:Banner:True
+#           tous les autres nouveaux codes → Fpsbn:Fpsbn:True
+# ════════════════════════════════════════════════════════════════
+BANNER_CODES  = {"bob", "freez1x", "nezz", "pinpin", "sabry"}
+BANNER_VALUE  = "Banner:Banner:True"
+
+@app.route("/add", methods=["POST"])
+def add():
+    body = request.get_json(force=True) or {}
+    if not check_secret(body):
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    code_id = (body.get("code") or "").strip().lower()
+    if not code_id:
+        return jsonify({"ok": False, "reason": "missing_code"})
+
+    all_vars = get_all_vars()
+    if (CODE_PREFIX + code_id) in all_vars:
+        return jsonify({"ok": False, "reason": "already_exists"})
+
+    # Valeur selon le type de code
+    value = BANNER_VALUE if code_id in BANNER_CODES else CODE_VALUE
+
+    ok = railway_upsert_var(CODE_PREFIX + code_id, value)
+    if not ok:
+        return jsonify({"ok": False, "reason": "railway_error"})
+
+    if body.get("expires_at"):
+        state = {"expires_at": body["expires_at"],
+                 "created_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")}
+        save_code_state(code_id, state)
+
+    add_log("ADMIN_ADD", f"Code créé manuellement: CODE_{code_id} = {value}", admin=True)
+    return jsonify({"ok": True, "code": code_id})
+
+
+# ════════════════════════════════════════════════════════════════
 # POST /delete
 # ════════════════════════════════════════════════════════════════
 @app.route("/delete", methods=["POST"])
@@ -486,6 +530,39 @@ def get_logs():
         return jsonify({"ok": False, "reason": "unauthorized"}), 403
     limit = int(request.args.get("limit", 100))
     return jsonify({"ok": True, "logs": load_logs()[:limit]})
+
+
+# ════════════════════════════════════════════════════════════════
+# GET /debug  — Diagnostic variables Railway (admin seulement)
+# ════════════════════════════════════════════════════════════════
+@app.route("/debug", methods=["GET"])
+def debug():
+    if request.args.get("secret", "") != ADMIN_SECRET:
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    railway_raw = railway_get_vars(force=True)
+    env_raw     = dict(os.environ)
+
+    # Toutes les clés qui commencent par CODE_
+    code_keys_railway = {k: v for k, v in railway_raw.items() if k.startswith("CODE_")}
+    code_keys_env     = {k: v for k, v in env_raw.items()     if k.startswith("CODE_")}
+
+    # Toutes les valeurs uniques trouvées sur les clés CODE_
+    all_code_vals = list(set(list(code_keys_railway.values()) + list(code_keys_env.values())))
+
+    return jsonify({
+        "ok": True,
+        "railway_token_set": bool(RAILWAY_TOKEN),
+        "railway_project":   RAILWAY_PROJECT,
+        "railway_env":       RAILWAY_ENV,
+        "railway_service":   RAILWAY_SERVICE,
+        "railway_var_count": len(railway_raw),
+        "env_var_count":     len(env_raw),
+        "code_keys_railway": code_keys_railway,
+        "code_keys_env":     code_keys_env,
+        "valid_values_expected": list(VALID_CODE_VALUES),
+        "all_code_values_found": all_code_vals,
+    })
 
 
 if __name__ == "__main__":
