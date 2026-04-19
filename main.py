@@ -1,9 +1,11 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import json
 import os
 from datetime import datetime
 
 app = Flask(__name__)
+CORS(app) # Autorise les requêtes Cross-Origin (CORS) pour le panel admin
 
 # ── CONFIG ──────────────────────────────────────────────────────
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "ton_mot_de_passe_admin")
