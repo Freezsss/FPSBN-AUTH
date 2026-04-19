@@ -68,6 +68,10 @@ def invalidate_cache():
 
 def railway_upsert_var(name, value):
     if not RAILWAY_TOKEN:
+        print("[Railway] upsertVar: RAILWAY_TOKEN manquant")
+        return False
+    if not RAILWAY_PROJECT or not RAILWAY_ENV or not RAILWAY_SERVICE:
+        print(f"[Railway] upsertVar: IDs manquants project={RAILWAY_PROJECT} env={RAILWAY_ENV} service={RAILWAY_SERVICE}")
         return False
     mutation = """
     mutation upsertVar($input: VariableUpsertInput!) {
@@ -83,8 +87,13 @@ def railway_upsert_var(name, value):
             }}
         }, timeout=10)
         data = resp.json()
+        print(f"[Railway] upsertVar response: {data}")
         invalidate_cache()
-        return data.get("data", {}).get("variableUpsert", False)
+        result = data.get("data", {}).get("variableUpsert", False)
+        if not result:
+            errors = data.get("errors", [])
+            print(f"[Railway] upsertVar FAILED errors: {errors}")
+        return result
     except Exception as e:
         print(f"[Railway] upsertVar error: {e}")
         return False
@@ -564,6 +573,60 @@ def debug():
         "all_code_values_found": all_code_vals,
     })
 
+
+
+# ════════════════════════════════════════════════════════════════
+# GET /debug-railway  — Diagnostic complet Railway
+# ════════════════════════════════════════════════════════════════
+@app.route("/debug-railway", methods=["GET"])
+def debug_railway():
+    if request.args.get("secret", "") != ADMIN_SECRET:
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    # Test lecture variables
+    railway_raw = {}
+    railway_error = None
+    try:
+        railway_raw = railway_get_vars(force=True)
+    except Exception as e:
+        railway_error = str(e)
+
+    # Test écriture (variable test temporaire)
+    write_test = False
+    write_error = None
+    try:
+        write_test = railway_upsert_var("DEBUG_TEST_VAR", "test_ok")
+        if write_test:
+            railway_delete_var("DEBUG_TEST_VAR")
+    except Exception as e:
+        write_error = str(e)
+
+    code_keys = {k: v for k, v in railway_raw.items() if k.startswith("CODE_")}
+    env_code_keys = {k: v for k, v in os.environ.items() if k.startswith("CODE_")}
+
+    return jsonify({
+        "ok": True,
+        "config": {
+            "RAILWAY_TOKEN_set": bool(RAILWAY_TOKEN),
+            "RAILWAY_TOKEN_prefix": RAILWAY_TOKEN[:8] + "..." if RAILWAY_TOKEN else None,
+            "RAILWAY_PROJECT_ID": RAILWAY_PROJECT,
+            "RAILWAY_ENVIRONMENT_ID": RAILWAY_ENV,
+            "RAILWAY_SERVICE_ID": RAILWAY_SERVICE,
+        },
+        "read_test": {
+            "success": bool(railway_raw),
+            "total_vars": len(railway_raw),
+            "error": railway_error,
+        },
+        "write_test": {
+            "success": write_test,
+            "error": write_error,
+        },
+        "codes_found": {
+            "from_railway_api": code_keys,
+            "from_os_environ": env_code_keys,
+        }
+    })
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
