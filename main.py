@@ -628,6 +628,87 @@ def debug_railway():
         }
     })
 
+# ════════════════════════════════════════════════════════════════
+# GET /debug-raw  — Retourne la réponse brute Railway GraphQL
+# ════════════════════════════════════════════════════════════════
+@app.route("/debug-raw", methods=["GET"])
+def debug_raw():
+    if request.args.get("secret", "") != ADMIN_SECRET:
+        return jsonify({"ok": False, "reason": "unauthorized"}), 403
+
+    # Test lecture brute
+    read_raw = None
+    read_status = None
+    read_error = None
+    try:
+        query = """
+        query getVars($projectId: String!, $environmentId: String!, $serviceId: String!) {
+          variables(projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId)
+        }
+        """
+        resp = requests.post(RAILWAY_GQL, headers=railway_headers(), json={
+            "query": query,
+            "variables": {"projectId": RAILWAY_PROJECT, "environmentId": RAILWAY_ENV, "serviceId": RAILWAY_SERVICE}
+        }, timeout=10)
+        read_status = resp.status_code
+        read_raw = resp.text[:2000]  # Limite pour lisibilité
+    except Exception as e:
+        read_error = str(e)
+
+    # Test écriture brute
+    write_raw = None
+    write_status = None
+    write_error = None
+    try:
+        mutation = """
+        mutation upsertVar($input: VariableUpsertInput!) {
+          variableUpsert(input: $input)
+        }
+        """
+        resp2 = requests.post(RAILWAY_GQL, headers=railway_headers(), json={
+            "query": mutation,
+            "variables": {"input": {
+                "projectId": RAILWAY_PROJECT,
+                "environmentId": RAILWAY_ENV,
+                "serviceId": RAILWAY_SERVICE,
+                "name": "DEBUG_RAW_TEST",
+                "value": "ok"
+            }}
+        }, timeout=10)
+        write_status = resp2.status_code
+        write_raw = resp2.text[:2000]
+        # Nettoyage
+        if resp2.status_code == 200:
+            try:
+                wd = resp2.json()
+                if wd.get("data", {}).get("variableUpsert"):
+                    railway_delete_var("DEBUG_RAW_TEST")
+            except Exception:
+                pass
+    except Exception as e:
+        write_error = str(e)
+
+    return jsonify({
+        "ok": True,
+        "ids_used": {
+            "project":     RAILWAY_PROJECT,
+            "environment": RAILWAY_ENV,
+            "service":     RAILWAY_SERVICE,
+        },
+        "token_prefix": RAILWAY_TOKEN[:12] + "..." if RAILWAY_TOKEN else None,
+        "read": {
+            "http_status": read_status,
+            "raw_response": read_raw,
+            "error": read_error,
+        },
+        "write": {
+            "http_status": write_status,
+            "raw_response": write_raw,
+            "error": write_error,
+        }
+    })
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
